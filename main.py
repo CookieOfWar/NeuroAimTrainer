@@ -1,0 +1,198 @@
+import pygame
+import random
+import sys
+import os
+
+import pygetwindow as gw
+from PIL import ImageGrab
+
+pygame.init()
+
+# Настройки Датасета 
+
+CREATE_DATASET = True
+CURRENT_PATH = os.getcwd()
+
+WIDTH, HEIGHT = 800, 600
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Aim Trainer")
+
+WHITE = (255, 255, 255)
+RED   = (255, 0, 0)
+BLACK = (0, 0, 0)
+
+font = pygame.font.SysFont(None, 36)
+target_radius = 30
+
+margin_x, margin_y = 150, 100  # область счётчиков в левом верхнем углу
+
+# минимальная дистанция между центром прицела и центром цели
+MIN_CURSOR_TARGET_DIST = 2 * target_radius
+
+def random_position():
+    x = random.randint(margin_x + target_radius, WIDTH - target_radius)
+    y = random.randint(margin_y + target_radius, HEIGHT - target_radius)
+    return x, y
+
+# состояние игры
+target_pos = random_position()
+target_visible = True
+
+hits = 0
+misses = 0
+
+# состояние для датасета
+game_started = False          # игнорируем первую цель
+need_spawn_new_target = False # в начале следующего кадра сменить цель
+need_start_shot = False       # в конце кадра сделать start
+start_shot = None             # start для текущей цели
+
+# курсор
+pygame.mouse.set_visible(False)
+clock = pygame.time.Clock()
+
+# окно и bbox клиентской области (без рамки и заголовка)
+try:
+    window = gw.getWindowsWithTitle("Aim Trainer")[0]
+
+    wx, wy = window.left, window.top
+    ww, wh = window.width, window.height
+
+    TITLE_BAR       = 30
+    BOTTOM_BORDER   = 8
+    LEFT_RIGHT_BORDER = 8
+
+    client_left   = wx + LEFT_RIGHT_BORDER
+    client_top    = wy + TITLE_BAR
+    client_right  = wx + ww - LEFT_RIGHT_BORDER
+    client_bottom = wy + wh - BOTTOM_BORDER
+
+    bbox = (client_left, client_top, client_right, client_bottom)
+except IndexError:
+    print("Окно не найдено. Проверьте заголовок.")
+    sys.exit()
+
+os.makedirs(os.path.join(CURRENT_PATH, "Dataset", "HITS"), exist_ok=True)
+os.makedirs(os.path.join(CURRENT_PATH, "Dataset", "MISSES"), exist_ok=True)
+
+def grab():
+    return ImageGrab.grab(bbox=bbox)
+
+def spawn_new_target():
+    global target_pos, target_visible
+    # текущая позиция курсора в координатах окна
+    mx, my = pygame.mouse.get_pos()
+
+    # подбор позиции, не впритык к курсору
+    while True:
+        x, y = random_position()
+        dx = x - mx
+        dy = y - my
+        dist = (dx*dx + dy*dy) ** 0.5
+        if dist >= MIN_CURSOR_TARGET_DIST:
+            target_pos = (x, y)
+            break
+
+    target_visible = True
+
+running = True
+while running:
+    # НАЧАЛО КАДРА: если флаг стоит — меняем цель
+    if need_spawn_new_target:
+        spawn_new_target()
+        need_spawn_new_target = False
+        # помечаем, что нужно сделать start-скриншот в конце текущего кадра
+        need_start_shot = True
+        start_shot = None
+
+    screen.fill(WHITE)
+
+    # цель
+    if target_visible:
+        pygame.draw.circle(screen, RED, target_pos, target_radius)
+
+    # курсор
+    mx, my = pygame.mouse.get_pos()
+    pygame.draw.circle(screen, BLACK, (mx, my), 10)
+
+    # обработка событий
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+
+        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            click_x, click_y = event.pos
+            if target_visible:
+                dist = ((click_x - target_pos[0]) ** 2 + (click_y - target_pos[1]) ** 2) ** 0.5
+
+                # первый клик — запускаем игру, текущую цель игнорируем полностью
+                if not game_started:
+                    game_started = True
+                    need_spawn_new_target = True   # в следующем кадре появится первая цель, которая идет в счет
+                    start_shot = None
+                    continue
+
+                # end-скриншот для текущей цели
+                end_shot = None
+                if CREATE_DATASET:
+                    try:
+                        end_shot = grab()
+                    except Exception as e:
+                        print("Ошибка end:", e)
+
+                # проверяем на попадание
+                if dist <= target_radius:
+                    idx = hits
+                    hits += 1
+                    if CREATE_DATASET:
+                        try:
+                            if start_shot is not None:
+                                start_shot.save(os.path.join(
+                                    CURRENT_PATH, "Dataset", "HITS", f"hit_start_{idx}.png"
+                                ))
+                            if end_shot is not None:
+                                end_shot.save(os.path.join(
+                                    CURRENT_PATH, "Dataset", "HITS", f"hit_end_{idx}.png"
+                                ))
+                        except Exception as e:
+                            print("Ошибка сохранения hit-пары:", e)
+                else:
+                    idx = misses
+                    misses += 1
+                    if CREATE_DATASET:
+                        try:
+                            if start_shot is not None:
+                                start_shot.save(os.path.join(
+                                    CURRENT_PATH, "Dataset", "MISSES", f"miss_start_{idx}.png"
+                                ))
+                            if end_shot is not None:
+                                end_shot.save(os.path.join(
+                                    CURRENT_PATH, "Dataset", "MISSES", f"miss_end_{idx}.png"
+                                ))
+                        except Exception as e:
+                            print("Ошибка сохранения miss-пары:", e)
+
+                # указываем, что нужно спавнить новую цель в следующем кадре
+                need_spawn_new_target = True
+                start_shot = None
+
+    # выводим счетчики попаданий и промахов
+    # изначально был HUD, но в пользу чистых данных он был убран, чтобы не путать нейросеть изменяющимся счетчиком
+        print(f"hits: {hits}, misses: {misses}")
+
+    # Рендер
+    pygame.display.flip()
+
+    # делаем start-скриншот после рендера экрана и новой цели
+    if CREATE_DATASET and game_started and need_start_shot:
+        try:
+            start_shot = grab()
+        except Exception as e:
+            print("Ошибка start:", e)
+            start_shot = None
+        need_start_shot = False
+
+    clock.tick(60)
+
+pygame.quit()
+sys.exit()
