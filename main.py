@@ -2,7 +2,7 @@ import pygame
 import random
 import sys
 import os
-
+# Ненужный комментарий для коммита
 import pygetwindow as gw
 from PIL import ImageGrab
 
